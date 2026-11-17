@@ -1,0 +1,9 @@
+{
+  "vocab_size": 24756,
+  "special_tokens": [
+    "<|endoftext|>",
+    "<|system|>",
+    "<|user|>",
+    "<|assistant|>"
+  ]
+}

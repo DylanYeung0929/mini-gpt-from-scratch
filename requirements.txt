@@ -1,0 +1,16 @@
+torch>=2.5
+numpy
+tqdm
+matplotlib
+tensorboard
+tokenizers
+transformers
+datasets
+accelerate
+peft
+safetensors
+gradio
+pyyaml
+einops
+sentencepiece
+requests
