@@ -4,6 +4,7 @@ import json
 import math
 import os
 import random
+import sys
 import time
 
 import torch
@@ -93,6 +94,8 @@ def parse_args():
     p.add_argument("--full_finetune", action="store_true")
     p.add_argument("--dtype", default="bfloat16")
     p.add_argument("--seed", type=int, default=1337)
+    p.add_argument("--log_steps", action="store_true",
+                   help="write per-step loss/lr/grad-norm/tokens to run_dir")
     p.add_argument("--save_merged", action="store_true", default=True)
     return p.parse_args()
 
@@ -154,6 +157,21 @@ def main():
     total_steps = steps_per_epoch * args.epochs
     warmup = min(100, total_steps // 10 + 1)
 
+    steps_path = os.path.join(run_dir, "steps.jsonl")
+    if args.log_steps:
+        open(steps_path, "w").close()  # fresh log per run
+        gpu_props = (torch.cuda.get_device_properties(0)
+                     if torch.cuda.is_available() else None)
+        save_json(os.path.join(run_dir, "run_meta.json"), {
+            "argv": sys.argv, "torch": torch.__version__, "device": str(device),
+            "gpu": gpu_props.name if gpu_props else "cpu",
+            "gpu_total_mem_mb": (round(gpu_props.total_memory / 2**20, 1)
+                                 if gpu_props else None),
+            "train_rows": len(train_ds), "val_rows": len(val_ds),
+            "trainable_params": int(sum(p.numel() for p in params)),
+            "total_steps": total_steps, "warmup": warmup, "dtype": args.dtype,
+        })
+
     def lr_at(step):
         if step < warmup:
             return args.lr * (step + 1) / warmup
@@ -176,9 +194,13 @@ def main():
         return tot / max(1, n)
 
     step = 0
+    sup_seen = 0
+    sup_acc = 0
+    step_loss = 0.0
     model.train()
     t0 = time.time()
     for epoch in range(args.epochs):
+        step_loss, sup_acc = 0.0, 0
         order = list(range(len(train_ds)))
         random.shuffle(order)
         optimizer.zero_grad(set_to_none=True)
@@ -193,16 +215,33 @@ def main():
                 _, loss, _ = model(x, y)
             (loss / args.grad_accum).backward()
             accum_loss += loss.item()
+            step_loss += loss.item()
+            sup_acc += int((y != -100).sum())
 
             if (it // args.batch_size + 1) % args.grad_accum == 0:
                 lr = lr_at(step)
                 for g in optimizer.param_groups:
                     g["lr"] = lr
-                torch.nn.utils.clip_grad_norm_(params, 1.0)
+                gn = float(torch.nn.utils.clip_grad_norm_(params, 1.0))
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
                 step += 1
+                sup_seen += sup_acc
+                if args.log_steps:
+                    rec = {
+                        "step": step, "epoch": epoch,
+                        "loss": round(step_loss / args.grad_accum, 4),
+                        "lr": lr, "grad_norm": round(gn, 4),
+                        "supervised_tokens": sup_acc,
+                        "time_s": round(time.time() - t0, 2),
+                        "max_mem_alloc_mb": (round(torch.cuda.max_memory_allocated() / 2**20, 1)
+                                             if torch.cuda.is_available() else None),
+                    }
+                    with open(steps_path, "a", encoding="utf-8") as sf:
+                        sf.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                sup_acc = 0
+                step_loss = 0.0
                 if step % 10 == 0:
                     msg = logger.log(step=step, loss=round(accum_loss / (10 * args.grad_accum), 4),
                                      lr=f"{lr:.2e}", time_s=round(time.time() - t0, 1))
@@ -229,6 +268,18 @@ def main():
         merged = merge_lora(model)
         torch.save({"model": merged.state_dict(), "config": mcfg.__dict__, "sft": True},
                    os.path.join(args.out_dir, "sft_merged.pt"))
+    if args.log_steps:
+        mem = {}
+        if torch.cuda.is_available():
+            mem = {
+                "max_memory_allocated_mb": round(torch.cuda.max_memory_allocated() / 2**20, 1),
+                "max_memory_reserved_mb": round(torch.cuda.max_memory_reserved() / 2**20, 1),
+            }
+        save_json(os.path.join(run_dir, "run_summary.json"), {
+            "steps": step, "epochs": args.epochs,
+            "elapsed_s": round(time.time() - t0, 1),
+            "supervised_tokens_seen": sup_seen,
+            "rows_train": len(train_ds), "rows_val": len(val_ds), **mem})
     print(f"done in {time.time()-t0:.0f}s -> {args.out_dir}")
 
 
