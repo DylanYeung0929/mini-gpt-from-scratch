@@ -45,7 +45,8 @@ def main():
     pt.add_argument("--input", required=True, help="comma separated corpus files")
     pt.add_argument("--out", default="X:/llm-course/repo/artifacts/tokenizer")
     pt.add_argument("--vocab_size", type=int, default=32768)
-    pt.add_argument("--sample_chars", type=int, default=300_000_000)
+    pt.add_argument("--sample_chars", type=int, default=150_000_000,
+                    help="character budget per corpus file (not shared)")
     pt.set_defaults(func=cmd_tokenizer)
 
     pb = sub.add_parser("bins")

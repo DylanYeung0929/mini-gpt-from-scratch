@@ -6,8 +6,14 @@ from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders, pr
 SPECIAL_TOKENS = ["<|endoftext|>", "<|system|>", "<|user|>", "<|assistant|>"]
 
 
-def train_bpe(text_files, out_dir, vocab_size=32768, sample_chars=300_000_000):
-    """Train a byte-level BPE tokenizer on (a sample of) the given text files."""
+def train_bpe(text_files, out_dir, vocab_size=32768, sample_chars=150_000_000):
+    """Train a byte-level BPE tokenizer on (a sample of) the given text files.
+
+    ``sample_chars`` is the character budget *per file*: every corpus in
+    ``text_files`` contributes up to the same number of characters.  An
+    earlier version shared one global budget across files, so the first
+    (English) corpus could exhaust it before any Chinese text was read.
+    """
     tok = Tokenizer(models.BPE(unk_token=None))
     tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
     tok.decoder = decoders.ByteLevel()
@@ -22,11 +28,11 @@ def train_bpe(text_files, out_dir, vocab_size=32768, sample_chars=300_000_000):
     )
 
     def text_iter():
-        budget = sample_chars
         for path in text_files:
+            budget = sample_chars  # per-file budget
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
                 while budget > 0:
-                    chunk = f.read(1_000_000)
+                    chunk = f.read(min(1_000_000, budget))
                     if not chunk:
                         break
                     budget -= len(chunk)
