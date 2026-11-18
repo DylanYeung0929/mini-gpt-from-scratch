@@ -1,4 +1,6 @@
 """Checkpoint loading + streaming generation shared by CLI / web app."""
+import warnings
+
 import torch
 
 from .config import GPTConfig
@@ -28,6 +30,14 @@ def stream_generate(model, tok, prompt, max_new_tokens=256, temperature=0.8,
     from .generate import sample_next_token
 
     ids = tok.encode(prompt) or [tok.eos_id]
+    max_ctx = model.cfg.block_size
+    if len(ids) >= max_ctx:
+        warnings.warn(f"prompt has {len(ids)} tokens but block_size is {max_ctx}; "
+                      f"keeping the last {max_ctx - 1}")
+        ids = ids[-(max_ctx - 1):]
+    if len(ids) + max_new_tokens > max_ctx:
+        max_new_tokens = max_ctx - len(ids)
+        warnings.warn(f"capping generation to {max_new_tokens} tokens to fit block_size")
     idx = torch.tensor([ids], dtype=torch.long, device=device)
     past = None
     text = ""

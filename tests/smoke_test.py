@@ -5,6 +5,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import numpy as np
 import torch
 
 from gptfs.config import GPTConfig
@@ -67,7 +68,7 @@ def test_lora():
 
 def test_tokenizer_and_data():
     from gptfs.tokenizer import train_bpe, TokenizerWrapper
-    from gptfs.data import prepare_token_bin
+    from gptfs.data import prepare_token_bin, get_batch
     from tokenizers import Tokenizer
 
     with tempfile.TemporaryDirectory() as d:
@@ -82,8 +83,15 @@ def test_tokenizer_and_data():
         meta = prepare_token_bin(text_path, os.path.join(d, "out.bin"), tok, verbose=False)
         assert meta["tokens"] > 0
         meta2 = prepare_token_bin(text_path, os.path.join(d, "val.bin"), tok, verbose=False)
-        print(f"tokenizer+data OK | vocab={tok.vocab_size} | tokens={meta['tokens']}")
-        print("decode check:", tok.decode(tok.encode("Hello world 你好")))
+        text = "Hello world 你好"
+        assert tok.decode(tok.encode(text)) == text, "tokenizer round-trip is not lossless"
+        data = np.memmap(os.path.join(d, "out.bin"), dtype=np.uint16, mode="r")
+        x, y = get_batch(data, block_size=16, batch_size=2, device=torch.device("cpu"))
+        assert tuple(x.shape) == (2, 16) and tuple(y.shape) == (2, 16)
+        assert int(x.min()) >= 0 and int(x.max()) < tok.vocab_size
+        data._mmap.close()          # release the file handle before tempdir cleanup (Windows)
+        print(f"tokenizer+data OK | vocab={tok.vocab_size} | tokens={meta['tokens']}"
+              f" | roundtrip OK | window={tuple(x.shape)}")
 
 
 if __name__ == "__main__":

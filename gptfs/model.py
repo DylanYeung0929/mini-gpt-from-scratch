@@ -4,6 +4,7 @@ Components: token embedding, RoPE, causally-masked multi-head attention
 (with optional grouped-query attention), RMSNorm, SwiGLU MLP, weight tying.
 """
 import math
+import warnings
 
 import torch
 import torch.nn as nn
@@ -177,6 +178,17 @@ class GPT(nn.Module):
                  repetition_penalty=1.0, eos_id=None):
         """Autoregressive sampling with KV cache."""
         from .generate import sample_next_token
+
+        max_ctx = self.cfg.block_size
+        if idx.shape[1] >= max_ctx:
+            warnings.warn(f"prompt has {idx.shape[1]} tokens but block_size is {max_ctx}; "
+                          f"keeping the last {max_ctx - 1}")
+            idx = idx[:, -(max_ctx - 1):]
+        if idx.shape[1] + max_new_tokens > max_ctx:
+            max_new_tokens = max_ctx - idx.shape[1]
+            warnings.warn(f"capping generation to {max_new_tokens} tokens to fit block_size")
+        if max_new_tokens <= 0:
+            return idx
 
         past_kvs = None
         for _ in range(max_new_tokens):

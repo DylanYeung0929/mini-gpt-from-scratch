@@ -8,18 +8,20 @@ settings) are generated with a fixed seed.  For each output we measure:
   * repetition -- 1 - distinct-4-gram ratio over characters.
 
 The subset is written for this evaluation only and is not part of the SFT
-data.  Pretrained checkpoints receive the bare instruction (they were never
-trained on the chat template); SFT checkpoints receive the training template.
+data.  By default pretrained checkpoints receive the bare instruction and SFT
+checkpoints receive the training template; --prompt_format decouples the two
+so that checkpoint and prompt format can be compared independently.
 
 Usage:
   python scripts/eval_story_task.py --ckpt <pt> --tokenizer_dir <dir> \
-      --mode pre|sft --tag bi_pre --out <json>
+      --mode pre|sft [--prompt_format auto|bare|template] --tag bi_pre --out <json>
 """
 import argparse
 import json
 import os
 import re
 import sys
+import time
 
 import torch
 
@@ -86,8 +88,11 @@ def parse_args():
     p.add_argument("--ckpt", required=True)
     p.add_argument("--tokenizer_dir", required=True)
     p.add_argument("--mode", choices=["pre", "sft"], required=True)
+    p.add_argument("--prompt_format", choices=["auto", "bare", "template"],
+                   default="auto", help="auto: template for sft, bare for pre")
     p.add_argument("--tag", required=True)
     p.add_argument("--out", required=True)
+    p.add_argument("--jsonl", default=None, help="optional per-sample JSONL")
     p.add_argument("--max_new_tokens", type=int, default=160)
     p.add_argument("--temperature", type=float, default=0.7)
     p.add_argument("--top_k", type=int, default=50)
@@ -103,40 +108,69 @@ def main():
     model, tok = load_model(args.ckpt, args.tokenizer_dir, device)
     model.eval()
     set_seed(args.seed)
+    prompt_format = args.prompt_format
+    if prompt_format == "auto":
+        prompt_format = "template" if args.mode == "sft" else "bare"
+    condition = f"{args.tag}:{prompt_format}"
 
     rows = []
-    for lang, prompt, keys in PROMPTS:
-        if args.mode == "sft":
+    for i, (lang, prompt, keys) in enumerate(PROMPTS):
+        if prompt_format == "template":
             text = f"<|user|>\n{prompt}\n<|assistant|>\n"
         else:
             text = prompt + "\n"
         ids = tok.encode(text)
         idx = torch.tensor([ids], dtype=torch.long, device=device)
+        t0 = time.perf_counter()
         with torch.inference_mode():
             out = model.generate(idx, max_new_tokens=args.max_new_tokens,
                                  temperature=args.temperature, top_k=args.top_k,
                                  top_p=args.top_p,
                                  repetition_penalty=args.repetition_penalty,
                                  eos_id=tok.eos_id)
+        latency_ms = (time.perf_counter() - t0) * 1000
+        n_new = int(out.shape[1] - len(ids))
         gen = tok.decode(out[0, len(ids):].tolist()).replace("<|endoftext|>", "").strip()
         low = gen.lower()
         coverage = sum(1 for k in keys if k.lower() in low)
         zh_r, en_r = cjk_ratio(gen)
         lang_ratio = zh_r if lang == "zh" else en_r
         d4 = distinct_ratio(gen)
+        fails = []
+        if coverage < len(keys):
+            fails.append("missing_keyword")
+        if lang_ratio < 0.85:
+            fails.append("language_mix")
+        if d4 < 0.70:
+            fails.append("repetition")
         rows.append({
+            "run_id": args.tag, "sample_id": i, "condition": condition,
+            "prompt_format": prompt_format, "ckpt": args.ckpt, "mode": args.mode,
+            "seed": args.seed, "sampling": {
+                "max_new_tokens": args.max_new_tokens,
+                "temperature": args.temperature, "top_k": args.top_k,
+                "top_p": args.top_p, "repetition_penalty": args.repetition_penalty},
             "lang": lang, "prompt": prompt, "keywords": keys, "output": gen,
             "coverage": coverage, "lang_ratio": round(lang_ratio, 3),
             "distinct4": round(d4, 3), "repetition": round(1 - d4, 3),
-            "chars": len(gen),
+            "chars": len(gen), "output_tokens": n_new,
+            "stop_reason": "eos" if int(out[0, -1]) == tok.eos_id else "max_new_tokens",
+            "latency_ms": round(latency_ms, 1), "failures": fails,
             "success": bool(coverage == len(keys) and lang_ratio >= 0.85 and d4 >= 0.70),
         })
 
     def mean(xs):
         return round(sum(xs) / len(xs), 3)
 
+    failure_counts = {}
+    for r in rows:
+        for f in r["failures"]:
+            failure_counts[f] = failure_counts.get(f, 0) + 1
+
     summary = {
-        "tag": args.tag, "ckpt": args.ckpt, "mode": args.mode,
+        "tag": args.tag, "condition": condition, "prompt_format": prompt_format,
+        "ckpt": args.ckpt, "mode": args.mode, "seed": args.seed,
+        "failure_counts": failure_counts,
         "n": len(rows),
         "coverage_mean": mean([r["coverage"] for r in rows]),
         "full_coverage_rate": mean([r["coverage"] == 3 for r in rows]),
@@ -152,6 +186,10 @@ def main():
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump({"summary": summary, "rows": rows}, f, ensure_ascii=False, indent=2)
+    if args.jsonl:
+        with open(args.jsonl, "w", encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
 
 if __name__ == "__main__":

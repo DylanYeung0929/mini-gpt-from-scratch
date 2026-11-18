@@ -14,8 +14,8 @@ from gptfs.utils import get_device
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--ckpt", default="X:/llm-course/checkpoints/sft/sft_merged.pt")
-    p.add_argument("--tokenizer_dir", default="X:/llm-course/repo/artifacts/tokenizer")
+    p.add_argument("--ckpt", default="X:/llm-course/checkpoints/sft_bi/sft_merged.pt")
+    p.add_argument("--tokenizer_dir", default="X:/llm-course/repo/artifacts/tokenizer_bi")
     p.add_argument("--port", type=int, default=7860)
     args = p.parse_args()
 
